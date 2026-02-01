@@ -14,6 +14,7 @@ from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import (
     AIFI,
     MobileViTBlock,
+    MobileViTBlockv2,
     C1,
     C2,
     C2PSA,
