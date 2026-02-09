@@ -130,3 +130,25 @@ cfg: # (str, optional) path to a config.yaml that overrides defaults
 
 # Tracker settings ------------------------------------------------------------------------------------------------------
 tracker: botsort.yaml # (str) tracker config file: botsort.yaml or bytetrack.yaml
+
+# Model Compression settings -------------------------------------------------------------------------------------------
+# L1 Regularization for sparsity training
+l1_regularization: False # (bool) enable L1 regularization for sparsity
+lambda_l1: 0.00001 # (float) L1 regularization coefficient (1e-5 recommended)
+structured_l1: False # (bool) use structured L1 for channel-level sparsity
+lambda_bn: 0.0001 # (float) BatchNorm L1 coefficient for channel pruning (1e-4 recommended)
+
+# Channel and Layer Pruning
+pruning: False # (bool) enable model pruning
+pruning_ratio: 0.3 # (float) ratio of channels to prune (0.0-1.0)
+pruning_method: channel # (str) pruning method: 'channel' or 'layer'
+importance_metric: l1 # (str) importance metric: 'l1', 'l2', or 'bn'
+prune_at_epoch: 50 # (int) epoch to perform pruning (0 to disable)
+
+# Knowledge Distillation
+distillation: False # (bool) enable knowledge distillation
+teacher_model: # (str, optional) path to teacher model weights
+temperature: 4.0 # (float) distillation temperature (higher = softer targets)
+distill_alpha: 0.7 # (float) weight for distillation loss (0.0-1.0)
+distill_features: False # (bool) distill intermediate features as well
+distill_type: response # (str) distillation type: 'response', 'feature', or 'yolo'

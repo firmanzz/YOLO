@@ -63,6 +63,11 @@ from ultralytics.utils.torch_utils import (
     unwrap_model,
 )
 
+# Model compression utilities
+from ultralytics.utils.regularization import L1Regularizer, StructuredL1Regularizer, get_bn_l1_loss
+from ultralytics.utils.pruning import ChannelPruner, LayerPruner, prune_model
+from ultralytics.utils.distillation import KnowledgeDistiller, YOLODistiller
+
 
 class BaseTrainer:
     """A base class for creating trainers.
@@ -198,6 +203,11 @@ class BaseTrainer:
         self.tloss = None
         self.loss_names = ["Loss"]
         self.csv = self.save_dir / "results.csv"
+
+        # Model compression utilities
+        self.l1_regularizer = None
+        self.pruner = None
+        self.distiller = None
         if self.csv.exists() and not self.args.resume:
             self.csv.unlink()
         self.plot_idx = [0, 1, 2]
@@ -339,6 +349,9 @@ class BaseTrainer:
             if self.args.plots:
                 self.plot_training_labels()
 
+        # Setup model compression features
+        self._setup_compression()
+
         # Optimizer
         self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
         weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
@@ -425,15 +438,40 @@ class BaseTrainer:
                 # Forward
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
+                    
+                    # Get teacher outputs for distillation
+                    teacher_outputs = None
+                    if self.distiller is not None:
+                        teacher_outputs = self._get_teacher_outputs(batch)
+                    
                     if self.args.compile:
                         # Decouple inference and loss calculations for improved compile performance
                         preds = self.model(batch["img"])
                         loss, self.loss_items = unwrap_model(self.model).loss(batch, preds)
                     else:
                         loss, self.loss_items = self.model(batch)
-                    self.loss = loss.sum()
+                    
+                    # Apply distillation if enabled
+                    if self.distiller is not None and teacher_outputs is not None:
+                        if self.args.compile:
+                            student_outputs = preds
+                        else:
+                            # Re-run forward pass to get student outputs for distillation
+                            with torch.no_grad():
+                                student_outputs = self.model(batch["img"])
+                        
+                        distill_loss = self.distiller(teacher_outputs, student_outputs, hard_loss=loss.sum())
+                        loss = distill_loss
+                    
+                    # Apply L1 regularization
+                    if self.l1_regularizer is not None:
+                        loss = self._apply_compression_loss(loss)
+                    else:
+                        loss = loss.sum()
+                    
                     if RANK != -1:
-                        self.loss *= self.world_size
+                        loss *= self.world_size
+                    self.loss = loss
                     self.tloss = self.loss_items if self.tloss is None else (self.tloss * i + self.loss_items) / (i + 1)
 
                 # Backward
@@ -479,6 +517,9 @@ class BaseTrainer:
             self.run_callbacks("on_train_epoch_end")
             if RANK in {-1, 0}:
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
+
+            # Apply pruning at specified epoch
+            self._apply_pruning(epoch)
 
             # Validation
             final_epoch = epoch + 1 >= self.epochs
@@ -535,6 +576,138 @@ class BaseTrainer:
         self._clear_memory()
         unset_deterministic()
         self.run_callbacks("teardown")
+
+    def _setup_compression(self):
+        """Setup model compression features: L1 regularization, pruning, and knowledge distillation."""
+        # L1 Regularization for sparsity training
+        if self.args.l1_regularization:
+            if self.args.structured_l1:
+                self.l1_regularizer = StructuredL1Regularizer(lambda_l1=self.args.lambda_l1)
+            else:
+                self.l1_regularizer = L1Regularizer(lambda_l1=self.args.lambda_l1)
+            LOGGER.info(f"L1 Regularization enabled: lambda_l1={self.args.lambda_l1}")
+        
+        # Pruning setup
+        if self.args.pruning:
+            # Detect model type for shortcut configuration
+            model_str = str(self.model)
+            if 'C2PSA' in model_str or 'C3k2' in model_str:
+                config_name = 'yolo26'  # YOLO26 architecture
+            elif 'YOLO11' in model_str:
+                config_name = 'yolo11'
+            else:
+                config_name = 'yolo26'  # Default to YOLO26
+            
+            self.pruner = ChannelPruner(
+                model=self.model,
+                pruning_ratio=self.args.pruning_ratio,
+                importance_metric=self.args.importance_metric,
+                preserve_shortcuts=True,  # Enable shortcut preservation
+                config_file=config_name    # Use detected config
+            )
+            LOGGER.info(
+                f"Pruning enabled: ratio={self.args.pruning_ratio}, "
+                f"method={self.args.pruning_method}, metric={self.args.importance_metric}, "
+                f"config={config_name}"
+            )
+        
+        # Knowledge Distillation setup
+        if self.args.distillation and self.args.teacher_model:
+            try:
+                # Load teacher model
+                from ultralytics.nn.tasks import attempt_load_weights
+                teacher = attempt_load_weights(self.args.teacher_model, device=self.device)
+                teacher.eval()
+                for param in teacher.parameters():
+                    param.requires_grad = False
+                
+                # Select distillation type
+                if self.args.distill_type == "yolo":
+                    self.distiller = YOLODistiller(
+                        teacher_model=teacher,
+                        student_model=self.model,
+                        alpha=self.args.distill_alpha
+                    )
+                else:
+                    self.distiller = KnowledgeDistiller(
+                        teacher_model=teacher,
+                        student_model=self.model,
+                        temperature=self.args.temperature,
+                        alpha=self.args.distill_alpha,
+                        distill_features=self.args.distill_features
+                    )
+                LOGGER.info(
+                    f"Knowledge Distillation enabled: teacher={self.args.teacher_model}, "
+                    f"alpha={self.args.distill_alpha}, T={self.args.temperature}"
+                )
+            except Exception as e:
+                LOGGER.warning(f"Failed to setup knowledge distillation: {e}")
+                self.distiller = None
+    
+    def _apply_compression_loss(self, base_loss):
+        """
+        Apply compression-related losses to the base loss.
+        
+        Args:
+            base_loss (torch.Tensor): Base training loss.
+            
+        Returns:
+            torch.Tensor: Combined loss with compression regularization.
+        """
+        total_loss = base_loss
+        
+        # Add L1 regularization loss
+        if self.l1_regularizer is not None:
+            l1_loss = self.l1_regularizer(self.model)
+            total_loss = total_loss + l1_loss
+            
+            # Log L1 loss
+            if RANK in {-1, 0} and hasattr(self, "l1_loss_value"):
+                self.l1_loss_value = l1_loss.item()
+        
+        # Add BatchNorm L1 loss if specified
+        if hasattr(self.args, "lambda_bn") and self.args.lambda_bn > 0:
+            bn_loss = get_bn_l1_loss(self.model, self.args.lambda_bn)
+            total_loss = total_loss + bn_loss
+        
+        return total_loss
+    
+    def _apply_pruning(self, epoch):
+        """
+        Apply pruning at specified epoch.
+        
+        Args:
+            epoch (int): Current training epoch.
+        """
+        if self.pruner is not None and self.args.prune_at_epoch > 0:
+            if epoch == self.args.prune_at_epoch:
+                LOGGER.info(f"Applying pruning at epoch {epoch}")
+                masks = self.pruner.prune()
+                sparsity_info = self.pruner.get_model_sparsity()
+                LOGGER.info(f"Model sparsity after pruning: {sparsity_info}")
+                
+                # Save pruning masks
+                if RANK in {-1, 0}:
+                    torch.save(
+                        {"masks": masks, "sparsity": sparsity_info},
+                        self.save_dir / f"pruning_masks_epoch{epoch}.pt"
+                    )
+    
+    def _get_teacher_outputs(self, batch):
+        """
+        Get teacher model outputs for distillation.
+        
+        Args:
+            batch (dict): Input batch.
+            
+        Returns:
+            Teacher model outputs.
+        """
+        if self.distiller is not None:
+            with torch.no_grad():
+                teacher_outputs = self.distiller.get_teacher_predictions(batch["img"])
+            return teacher_outputs
+        return None
 
     def auto_batch(self, max_num_obj=0):
         """Calculate optimal batch size based on model and device memory constraints."""

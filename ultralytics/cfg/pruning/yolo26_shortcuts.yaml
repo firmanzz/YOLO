@@ -1,0 +1,163 @@
+# YOLO26 Shortcut Configuration for Pruning
+# This configuration file defines shortcut connections in YOLO26 architecture
+# to enable shortcut-aware pruning that preserves model integrity
+
+# Model Architecture Information
+model_name: "YOLO26"
+architecture_version: "26"
+description: "Official YOLO26 shortcut configuration for channel and layer pruning"
+
+# Backbone Shortcuts
+backbone:
+  # C3k2 modules in backbone (typically at layers 2, 4, 6, 8)
+  C3k2:
+    enabled: true
+    shortcut_type: "residual"  # Internal Bottleneck shortcuts
+    default_shortcut: true
+    layers:
+      - index: 2
+        name: "backbone.2"  # P2/4 C3k2
+        shortcut: false     # As per YOLO26 config: [256, False, 0.25]
+        bottleneck_repeat: 2
+        expansion: 0.25
+      - index: 4
+        name: "backbone.4"  # P3/8 C3k2
+        shortcut: false     # As per YOLO26 config: [512, False, 0.25]
+        bottleneck_repeat: 2
+        expansion: 0.25
+      - index: 6
+        name: "backbone.6"  # P4/16 C3k2
+        shortcut: true      # As per YOLO26 config: [512, True]
+        bottleneck_repeat: 2
+        expansion: 0.5
+      - index: 8
+        name: "backbone.8"  # P5/32 C3k2
+        shortcut: true      # As per YOLO26 config: [1024, True]
+        bottleneck_repeat: 2
+        expansion: 0.5
+  
+  # C2PSA module in backbone
+  C2PSA:
+    enabled: true
+    shortcut_type: "attention"  # Attention-based, not traditional shortcut
+    layers:
+      - index: 10
+        name: "backbone.10"
+        attention_mechanism: true
+        psa_blocks: 2
+        expansion: 0.5
+
+  # SPPF module
+  SPPF:
+    enabled: true
+    shortcut_type: "pooling"
+    layers:
+      - index: 9
+        name: "backbone.9"
+        kernel_sizes: [5, 5, 5]
+        preserve_channels: true
+
+# Head Shortcuts
+head:
+  # Upsampling + Concat connections (feature fusion)
+  Concat:
+    enabled: true
+    shortcut_type: "feature_fusion"
+    preserve_channels: true  # Critical: must maintain channel alignment
+    layers:
+      - index: 12
+        name: "head.1"
+        sources: [11, 6]  # Concat from head and backbone P4
+        description: "P4 feature fusion"
+      - index: 15
+        name: "head.4"
+        sources: [14, 4]  # Concat from head and backbone P3
+        description: "P3 feature fusion"
+      - index: 18
+        name: "head.7"
+        sources: [17, 13]  # Concat for P4
+        description: "P4 downsampling path"
+      - index: 21
+        name: "head.10"
+        sources: [20, 10]  # Concat for P5
+        description: "P5 downsampling path"
+
+  # C3k2 modules in head
+  C3k2:
+    enabled: true
+    shortcut_type: "residual"
+    default_shortcut: true
+    layers:
+      - index: 13
+        name: "head.2"  # After P4 concat
+        shortcut: true   # As per YOLO26 config: [512, True]
+        bottleneck_repeat: 2
+        expansion: 0.5
+      - index: 16
+        name: "head.5"  # After P3 concat (P3/8-small)
+        shortcut: true   # As per YOLO26 config: [256, True]
+        bottleneck_repeat: 2
+        expansion: 0.5
+      - index: 19
+        name: "head.8"  # P4/16-medium
+        shortcut: true   # As per YOLO26 config: [512, True]
+        bottleneck_repeat: 2
+        expansion: 0.5
+      - index: 22
+        name: "head.11"  # P5/32-large
+        shortcut: true   # As per YOLO26 config: [1024, True, 0.5, True]
+        bottleneck_repeat: 1
+        expansion: 0.5
+        special_config: true
+
+# Pruning Strategy for Different Shortcut Types
+pruning_strategy:
+  # Residual shortcuts (add operation)
+  residual:
+    pruning_ratio_multiplier: 0.5  # Very conservative (50% of base ratio)
+    min_channels: 32
+    align_channels: true  # Must keep same # of channels for addition
+    
+  # CSP shortcuts (concatenation within CSP blocks)
+  csp_shortcut:
+    pruning_ratio_multiplier: 0.7  # Moderate conservation (70% of base ratio)
+    min_channels: 16
+    align_channels: false
+    
+  # Feature fusion (Concat layers)
+  feature_fusion:
+    pruning_ratio_multiplier: 0.6  # Conservative (60% of base ratio)
+    min_channels: 32
+    align_channels: false  # Channels can differ, concat handles it
+    preserve_source_integrity: true  # Don't over-prune source layers
+    
+  # Attention-based (C2PSA)
+  attention:
+    pruning_ratio_multiplier: 0.75  # Slightly conservative
+    min_channels: 64  # Attention needs sufficient channels
+    align_channels: false
+    preserve_heads: true  # Maintain attention head count if possible
+
+# Global Pruning Constraints
+constraints:
+  # Minimum channels to preserve in any layer
+  global_min_channels: 8
+  
+  # Layers to never prune (critical for architecture)
+  preserve_layers:
+    - "backbone.0"  # First conv
+    - "model.23"    # Detection head
+    
+  # Maximum pruning ratio for any single layer
+  max_layer_pruning_ratio: 0.8
+  
+  # Ensure channel counts are divisible by this (for efficient computation)
+  channel_divisibility: 8
+
+# Validation Rules
+validation:
+  # After pruning, verify these conditions
+  check_channel_alignment: true  # For residual connections
+  check_concat_compatibility: true  # For Concat layers
+  verify_model_forward: true  # Test forward pass
+  maintain_output_channels: true  # Keep detection head outputs

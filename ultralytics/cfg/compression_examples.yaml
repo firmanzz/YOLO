@@ -1,0 +1,247 @@
+# Ultralytics Model Compression Configuration Examples
+# Gunakan dengan: yolo cfg=compression_config.yaml
+
+# =====================================================
+# Example 1: L1 Regularization Only
+# =====================================================
+# Uncomment untuk sparsity training
+# task: detect
+# mode: train
+# model: yolo26n.yaml
+# data: coco8.yaml
+# epochs: 100
+# batch: 16
+# imgsz: 640
+
+# # L1 Regularization settings
+# l1_regularization: True
+# lambda_l1: 0.00001        # 1e-5 recommended
+# structured_l1: True        # For channel-level sparsity
+# lambda_bn: 0.0001          # 1e-4 for BatchNorm
+
+
+# =====================================================
+# Example 2: Channel Pruning Only
+# =====================================================
+# Uncomment untuk pruning pre-trained model
+# task: detect
+# mode: train
+# model: yolo26n.pt          # Use pre-trained or sparsity-trained
+# data: coco8.yaml
+# epochs: 50
+# batch: 16
+# imgsz: 640
+
+# # Pruning settings
+# pruning: True
+# pruning_ratio: 0.3         # Prune 30% of channels
+# pruning_method: channel
+# importance_metric: bn      # or 'l1', 'l2'
+# prune_at_epoch: 10         # Prune at epoch 10
+
+
+# =====================================================
+# Example 3: Knowledge Distillation Only
+# =====================================================
+# Uncomment untuk distillation
+# task: detect
+# mode: train
+# model: yolo26n.yaml        # Student model
+# data: coco8.yaml
+# epochs: 100
+# batch: 16
+# imgsz: 640
+
+# # Distillation settings
+# distillation: True
+# teacher_model: yolo26x.pt  # Teacher model (larger)
+# temperature: 4.0           # Softening temperature
+# distill_alpha: 0.7         # 70% distillation, 30% hard target
+# distill_features: False
+# distill_type: response     # or 'feature', 'yolo'
+
+
+# =====================================================
+# Example 4: Sparsity + Pruning (2-Stage)
+# =====================================================
+# Stage 1: Sparsity training
+# Uncomment dan run pertama
+# task: detect
+# mode: train
+# model: yolo26n.yaml
+# data: coco8.yaml
+# epochs: 100
+# batch: 16
+# imgsz: 640
+# name: stage1_sparsity
+
+# l1_regularization: True
+# lambda_l1: 0.00005
+# structured_l1: True
+# lambda_bn: 0.0001
+
+# Stage 2: Pruning (setelah stage 1 selesai)
+# Uncomment, update model path, dan run kedua
+# task: detect
+# mode: train
+# model: runs/detect/stage1_sparsity/weights/best.pt
+# data: coco8.yaml
+# epochs: 50
+# batch: 16
+# imgsz: 640
+# name: stage2_pruning
+
+# pruning: True
+# pruning_ratio: 0.3
+# prune_at_epoch: 10
+# importance_metric: bn
+
+
+# =====================================================
+# Example 5: Full Pipeline (3-Stage)
+# =====================================================
+# Stage 1: Sparsity + Distillation
+task: detect
+mode: train
+model: yolo26n.yaml
+data: coco8.yaml
+epochs: 100
+batch: 16
+imgsz: 640
+name: full_compression_stage1
+
+# L1 Regularization
+l1_regularization: True
+lambda_l1: 0.00005
+structured_l1: True
+lambda_bn: 0.0001
+
+# Knowledge Distillation
+distillation: True
+teacher_model: yolo26x.pt
+temperature: 4.0
+distill_alpha: 0.7
+distill_type: response
+
+# Stage 2: Pruning (setelah stage 1 selesai)
+# Update config:
+# model: runs/detect/full_compression_stage1/weights/best.pt
+# name: full_compression_stage2
+# epochs: 50
+# distillation: False
+# pruning: True
+# pruning_ratio: 0.3
+# prune_at_epoch: 10
+
+# Stage 3: Fine-tune (setelah stage 2 selesai)
+# Update config:
+# model: runs/detect/full_compression_stage2/weights/best.pt
+# name: full_compression_stage3
+# epochs: 50
+# pruning: False
+# distillation: True
+
+
+# =====================================================
+# Example 6: Aggressive Compression
+# =====================================================
+# Uncomment untuk kompresi agresif
+# task: detect
+# mode: train
+# model: yolo26n.yaml
+# data: coco8.yaml
+# epochs: 100
+# batch: 16
+# imgsz: 640
+# name: aggressive_compression
+
+# # Aggressive L1
+# l1_regularization: True
+# lambda_l1: 0.0001          # Higher = more sparsity
+# structured_l1: True
+# lambda_bn: 0.0005          # Higher = more channel sparsity
+
+# # Aggressive Pruning
+# pruning: True
+# pruning_ratio: 0.5         # Prune 50% channels
+# prune_at_epoch: 50
+# importance_metric: bn
+
+# # Strong Distillation
+# distillation: True
+# teacher_model: yolo26x.pt
+# temperature: 5.0           # Higher = softer targets
+# distill_alpha: 0.8         # More weight on distillation
+
+
+# =====================================================
+# Example 7: Gentle Compression (High Accuracy)
+# =====================================================
+# Uncomment untuk kompresi dengan accuracy priority
+# task: detect
+# mode: train
+# model: yolo26n.yaml
+# data: coco8.yaml
+# epochs: 150                # More epochs
+# batch: 16
+# imgsz: 640
+# name: gentle_compression
+
+# # Gentle L1
+# l1_regularization: True
+# lambda_l1: 0.000005        # Lower = less aggressive
+# structured_l1: True
+# lambda_bn: 0.00005
+
+# # Gentle Pruning
+# pruning: True
+# pruning_ratio: 0.2         # Prune only 20%
+# prune_at_epoch: 80         # Later pruning
+# importance_metric: bn
+
+# # Balanced Distillation
+# distillation: True
+# teacher_model: yolo26l.pt  # Not the largest
+# temperature: 3.0
+# distill_alpha: 0.6
+
+
+# =====================================================
+# Common Training Settings
+# =====================================================
+# These apply to all examples above
+
+# Optimizer
+optimizer: auto              # or SGD, Adam, AdamW
+lr0: 0.01                   # Initial learning rate
+lrf: 0.01                   # Final learning rate fraction
+momentum: 0.937
+weight_decay: 0.0005
+
+# Scheduler
+cos_lr: False               # Cosine LR scheduler
+warmup_epochs: 3.0
+
+# Augmentation
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+degrees: 0.0
+translate: 0.1
+scale: 0.5
+mosaic: 1.0
+mixup: 0.0
+
+# Validation
+val: True
+patience: 50                # Early stopping patience
+save: True
+save_period: -1
+
+# Device
+device:                     # '' for auto, '0' for GPU 0, 'cpu' for CPU
+workers: 8
+
+# Misc
+verbose: True
+plots: True
